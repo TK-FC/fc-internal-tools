@@ -1,0 +1,23 @@
+# ============================================================
+# fc-health-worker — Cloudflare Worker config
+# ============================================================
+# Deploy: `wrangler deploy` (from /worker)
+# Tail logs: `wrangler tail`
+# Set secrets: see README.md
+# ============================================================
+
+name = "fc-health-worker"
+main = "src/index.js"
+compatibility_date = "2025-05-01"
+
+# Daily at 21:00 UTC = 7am AEST (Brisbane / no DST)
+# Sydney is also 7am AEST in winter, 8am AEDT in summer. Queensland doesn't
+# observe DST so 21:00 UTC stays 7am locally year-round for Sam.
+# Cron syntax: minute hour day-of-month month day-of-week
+[triggers]
+crons = ["0 21 * * *"]
+
+# Local dev: `wrangler dev` reads from .dev.vars (gitignored).
+# Production secrets go in via `wrangler secret put` — see README.
+[vars]
+# Non-secret config can live here. Currently nothing — everything is a secret.

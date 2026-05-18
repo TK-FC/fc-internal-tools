@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Activity, AlertCircle, CheckCircle2, Clock, DollarSign, Zap, RefreshCw, ExternalLink, User, FileText, Search, LayoutGrid, Layers, X, Link as LinkIcon, ListChecks, BookOpen, ChevronRight, Package, Lock, Unlock, ArrowLeft, CircleDot, Loader2 } from 'lucide-react';
-import { fetchProjects } from './lib/fetchProjects.js';
+import { fetchProjects } from './lib/fetchProjects';
+import { triggerHealthCheck } from './lib/worker';
 
 
 const STAGES = [
@@ -281,7 +282,7 @@ export default function AIDashboard() {
         )}
 
         {view.level === 'project' && selectedProject && <ProjectDetail project={selectedProject} onOpenModule={(moduleId) => setView({ level: 'module', projectId: selectedProject.id, moduleId })} />}
-        {view.level === 'module' && selectedModule && selectedProject && <ModuleDetail module={selectedModule} project={selectedProject} />}
+        {view.level === 'module' && selectedModule && selectedProject && <ModuleDetail module={selectedModule} project={selectedProject} onCheckNow={loadProjects} />}
         {view.level !== 'projects' && !selectedProject && (
           <div style={{ textAlign: 'center', padding: '60px 20px', color: TEXT_DIM, fontSize: 13 }}>
             That project no longer exists. <button onClick={() => setView({ level: 'projects' })} style={{ background: 'transparent', border: 'none', color: YELLOW, cursor: 'pointer', fontSize: 13, fontWeight: 600, padding: 0 }}>Back to all projects</button>
@@ -689,7 +690,28 @@ function ModuleRow({ module: mod, onClick, isLast }) {
 // MODULE DETAIL
 // ============================================================
 
-function ModuleDetail({ module: mod, project }) {
+function ModuleDetail({ module: mod, project, onCheckNow }) {
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState(null);
+  const [lastResult, setLastResult] = useState(null);
+
+  async function handleCheckNow() {
+    setChecking(true);
+    setCheckError(null);
+    setLastResult(null);
+    try {
+      const result = await triggerHealthCheck(mod.id);
+      setLastResult(result);
+      // Refetch projects so the new health status flows through the UI
+      if (onCheckNow) await onCheckNow();
+    } catch (err) {
+      console.error('[Check now] failed:', err);
+      setCheckError(err.message || 'Health check failed');
+    } finally {
+      setChecking(false);
+    }
+  }
+
   return (
     <div className="slide-in">
       <div style={{ background: PANEL, borderRadius: 8, border: `1px solid ${BORDER}`, padding: 24, marginBottom: 16, position: 'relative', overflow: 'hidden' }}>
@@ -717,9 +739,47 @@ function ModuleDetail({ module: mod, project }) {
         <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18, marginBottom: 12 }}>
           <SectionLabel icon={<LinkIcon size={12} />}>Endpoint</SectionLabel>
           <div style={{ fontFamily: 'monospace', fontSize: 12, color: TEXT, padding: '9px 11px', background: BG, borderRadius: 4, border: `1px solid ${BORDER}`, wordBreak: 'break-all', marginBottom: 10 }}>{mod.endpoint}</div>
-          <button style={{ padding: '7px 11px', border: `1px solid ${YELLOW}`, background: YELLOW, color: BG, borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <RefreshCw size={11} /> Check now
+          <button
+            onClick={handleCheckNow}
+            disabled={checking}
+            style={{
+              padding: '7px 11px', border: `1px solid ${YELLOW}`,
+              background: checking ? 'transparent' : YELLOW,
+              color: checking ? YELLOW : BG,
+              borderRadius: 4, fontSize: 12, fontWeight: 600,
+              cursor: checking ? 'wait' : 'pointer',
+              display: 'flex', alignItems: 'center', gap: 6,
+              opacity: checking ? 0.7 : 1
+            }}
+          >
+            <RefreshCw size={11} className={checking ? 'spin' : ''} />
+            {checking ? 'Checking…' : 'Check now'}
           </button>
+
+          {mod.lastError && !checking && !lastResult && (
+            <div style={{ marginTop: 10, padding: '7px 10px', background: HEALTH_CONFIG.red.bg, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG.red.color, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span><strong>Last error:</strong> {mod.lastError}</span>
+            </div>
+          )}
+
+          {checkError && (
+            <div style={{ marginTop: 10, padding: '7px 10px', background: HEALTH_CONFIG.red.bg, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG.red.color, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span><strong>Couldn't run check:</strong> {checkError}</span>
+            </div>
+          )}
+
+          {lastResult && lastResult.results?.[0] && (
+            <div style={{ marginTop: 10, padding: '8px 10px', background: HEALTH_CONFIG[lastResult.results[0].status]?.bg || BG, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG[lastResult.results[0].status]?.color || TEXT, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <CheckCircle2 size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                <strong>{HEALTH_CONFIG[lastResult.results[0].status]?.label || 'Result'}</strong>
+                {lastResult.results[0].response_time_ms != null && ` · ${lastResult.results[0].response_time_ms}ms`}
+                {lastResult.results[0].error && ` · ${lastResult.results[0].error}`}
+              </span>
+            </div>
+          )}
         </div>
       )}
 

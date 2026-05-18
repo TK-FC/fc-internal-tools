@@ -4,19 +4,23 @@ import { createClient } from '@supabase/supabase-js';
 //   VITE_SUPABASE_URL=https://xxxxx.supabase.co
 //   VITE_SUPABASE_ANON_KEY=eyJhbGc...
 //
-// Anon key is fine here — RLS is on and currently allows public read.
-// Writes are locked to service_role (used only by the Cloudflare Worker in Session 4).
+// Session 5: auth is now on. RLS policies in 04_rls_authed.sql gate every
+// table read on is_allowed(), which checks the JWT email against access_allowlist.
 
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!url || !anonKey) {
-  // Throw early so we don't get cryptic "fetch failed" errors later.
   throw new Error(
     'Missing Supabase env vars. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.local'
   );
 }
 
 export const supabase = createClient(url, anonKey, {
-  auth: { persistSession: false } // No auth yet — Session 5 turns this on
+  auth: {
+    persistSession: true,        // keep the user signed in across reloads
+    autoRefreshToken: true,      // rotate the JWT before it expires
+    detectSessionInUrl: true,    // pick up tokens from the OAuth redirect hash
+    flowType: 'pkce'             // recommended for SPAs
+  }
 });

@@ -11,20 +11,23 @@
 //   - Inserts a row into health_checks
 //   - Updates items.health_status + items.last_health_check + items.last_error
 //
-// Uses service_role key to bypass RLS. Never expose that key to the browser.
+// Auth (Session 5):
+//   - scheduled() needs no auth — it's invoked by Cloudflare directly.
+//   - fetch() POST /check requires Authorization: Bearer <Supabase JWT>.
+//     The Worker verifies the JWT (HS256, signed with SUPABASE_JWT_SECRET),
+//     reads the email claim, and checks it against access_allowlist via
+//     the service_role key.
 //
 // Required secrets (set with `wrangler secret put NAME`):
-//   SUPABASE_URL          — e.g. https://xxxxx.supabase.co (NO trailing slash)
-//   SUPABASE_SERVICE_KEY  — service_role key from Supabase project settings
-//   WORKER_SECRET         — shared secret the React app sends in x-worker-secret
+//   SUPABASE_URL           — e.g. https://xxxxx.supabase.co (NO trailing slash)
+//   SUPABASE_SERVICE_KEY   — service_role key from Supabase project settings
+//   SUPABASE_JWT_SECRET    — JWT signing secret from Supabase API settings
 // ============================================================
 
 const HEALTH_GREEN = 'green';
 const HEALTH_AMBER = 'amber';
 const HEALTH_RED = 'red';
 
-// 5s ceiling per check — keeps the whole cron job under Worker CPU limits
-// even if a couple of endpoints hang.
 const CHECK_TIMEOUT_MS = 5000;
 
 export default {
@@ -41,7 +44,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    // CORS preflight — needed because the React app calls this cross-origin
+    // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
@@ -51,15 +54,19 @@ export default {
       return json({ ok: true, service: 'fc-health-worker' });
     }
 
-    // POST /check — runs checks. Optional ?item_id=<uuid> to check just one.
+    // POST /check — runs checks. Optional ?item_id=<uuid>.
     if (url.pathname === '/check' && request.method === 'POST') {
-      const auth = request.headers.get('x-worker-secret');
-      if (!auth || auth !== env.WORKER_SECRET) {
-        return json({ error: 'unauthorized' }, 401);
+      const authResult = await authenticate(request, env);
+      if (!authResult.ok) {
+        return json({ error: authResult.error }, authResult.status);
       }
 
       const itemId = url.searchParams.get('item_id') || null;
-      const result = await runHealthChecks(env, { trigger: 'manual', itemId });
+      const result = await runHealthChecks(env, {
+        trigger: 'manual',
+        itemId,
+        triggeredBy: authResult.email
+      });
       return json(result);
     }
 
@@ -68,14 +75,104 @@ export default {
 };
 
 // ============================================================
+// AUTH: verify Supabase JWT + check allowlist
+// ============================================================
+async function authenticate(request, env) {
+  const header = request.headers.get('Authorization') || '';
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  if (!match) {
+    return { ok: false, status: 401, error: 'missing bearer token' };
+  }
+  const token = match[1];
+
+  let payload;
+  try {
+    payload = await verifyJwt(token, env.SUPABASE_JWT_SECRET);
+  } catch (err) {
+    return { ok: false, status: 401, error: `invalid token: ${err.message}` };
+  }
+
+  const email = (payload.email || '').toLowerCase();
+  if (!email) {
+    return { ok: false, status: 403, error: 'token has no email claim' };
+  }
+
+  // Belt-and-braces: enforce the @foodiecoaches.com cap server-side too.
+  if (!email.endsWith('@foodiecoaches.com')) {
+    return { ok: false, status: 403, error: 'domain not allowed' };
+  }
+
+  // Allowlist check via service_role — bypasses RLS, so this runs regardless
+  // of whether the user could SELECT their own row.
+  const sb = supabaseClient(env);
+  const res = await sb.fetch(
+    `${env.SUPABASE_URL}/rest/v1/access_allowlist?select=email,active&email=eq.${encodeURIComponent(email)}`
+  );
+  if (!res.ok) {
+    return { ok: false, status: 500, error: 'allowlist check failed' };
+  }
+  const rows = await res.json();
+  if (rows.length === 0 || rows[0].active !== true) {
+    return { ok: false, status: 403, error: 'not on allowlist' };
+  }
+
+  return { ok: true, email };
+}
+
+// ------------------------------------------------------------
+// Verify an HS256 JWT using Web Crypto. Returns the payload if valid.
+// Throws on bad signature, malformed token, or expired token.
+// ------------------------------------------------------------
+async function verifyJwt(token, secret) {
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('malformed');
+  const [headerB64, payloadB64, sigB64] = parts;
+
+  const header = JSON.parse(b64UrlDecodeStr(headerB64));
+  if (header.alg !== 'HS256') throw new Error(`unexpected alg ${header.alg}`);
+
+  // Verify signature
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+  const data = enc.encode(`${headerB64}.${payloadB64}`);
+  const sig = b64UrlDecodeBytes(sigB64);
+  const valid = await crypto.subtle.verify('HMAC', key, sig, data);
+  if (!valid) throw new Error('bad signature');
+
+  // Parse payload + check expiry
+  const payload = JSON.parse(b64UrlDecodeStr(payloadB64));
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.exp && now >= payload.exp) throw new Error('expired');
+  if (payload.nbf && now < payload.nbf) throw new Error('not yet valid');
+
+  return payload;
+}
+
+function b64UrlDecodeStr(s) {
+  return new TextDecoder().decode(b64UrlDecodeBytes(s));
+}
+function b64UrlDecodeBytes(s) {
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
+  const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+// ============================================================
 // Core: fetch endpoints, ping them, write results back
 // ============================================================
-async function runHealthChecks(env, { trigger, itemId = null }) {
+async function runHealthChecks(env, { trigger, itemId = null, triggeredBy = null }) {
   const startedAt = new Date().toISOString();
   const sb = supabaseClient(env);
 
-  // Pull modules with endpoints. (Projects don't have endpoints — only modules
-  // do per the schema. Filtering on endpoint NOT NULL handles both cases.)
   let query = `${env.SUPABASE_URL}/rest/v1/items?select=id,name,endpoint&endpoint=not.is.null`;
   if (itemId) query += `&id=eq.${itemId}`;
 
@@ -87,19 +184,16 @@ async function runHealthChecks(env, { trigger, itemId = null }) {
   const items = await itemsRes.json();
 
   if (items.length === 0) {
-    return { ok: true, trigger, checked: 0, message: 'no items with endpoints' };
+    return { ok: true, trigger, triggeredBy, checked: 0, message: 'no items with endpoints' };
   }
 
-  // Run all checks in parallel — they're independent and we want this fast.
   const results = await Promise.all(items.map(item => checkOne(item)));
-
-  // Write results back. Two writes per item: insert into health_checks,
-  // update items. Done in parallel across items but sequenced per item.
   await Promise.all(results.map(r => persistResult(sb, env, r)));
 
   return {
     ok: true,
     trigger,
+    triggeredBy,
     startedAt,
     finishedAt: new Date().toISOString(),
     checked: results.length,
@@ -115,9 +209,6 @@ async function runHealthChecks(env, { trigger, itemId = null }) {
   };
 }
 
-// ============================================================
-// Per-item check: dispatch by URL shape
-// ============================================================
 async function checkOne(item) {
   const t0 = Date.now();
   const base = { itemId: item.id, name: item.name, endpoint: item.endpoint };
@@ -136,87 +227,46 @@ async function checkOne(item) {
   }
 }
 
-// Return the right ping function for this endpoint URL.
-// Extend here as new endpoint types are added.
 function pickStrategy(endpoint) {
   const url = endpoint.toLowerCase();
-
-  // n8n webhooks: contain /webhook/ or /webhook-test/ in the path
-  if (url.includes('/webhook/') || url.includes('/webhook-test/')) {
-    return pingWebhookPost;
-  }
-
-  // Make.com webhooks: hook.<region>.make.com
-  if (/hook\.[a-z0-9-]+\.make\.com/.test(url)) {
-    return pingWebhookPost;
-  }
-
-  // Default: plain GET. Treats 2xx/3xx as green, 4xx as amber, 5xx/timeout as red.
+  if (url.includes('/webhook/') || url.includes('/webhook-test/')) return pingWebhookPost;
+  if (/hook\.[a-z0-9-]+\.make\.com/.test(url)) return pingWebhookPost;
   return pingHttpGet;
 }
 
-// ------------------------------------------------------------
-// Strategy: plain HTTP GET
-// 2xx/3xx => green, 4xx => amber (endpoint exists but rejecting), 5xx => red
-// ------------------------------------------------------------
 async function pingHttpGet(endpoint) {
   const res = await fetchWithTimeout(endpoint, { method: 'GET' });
-  if (res.status >= 200 && res.status < 400) {
-    return { status: HEALTH_GREEN, error: null };
-  }
-  if (res.status >= 400 && res.status < 500) {
-    return { status: HEALTH_AMBER, error: `HTTP ${res.status}` };
-  }
+  if (res.status >= 200 && res.status < 400) return { status: HEALTH_GREEN, error: null };
+  if (res.status >= 400 && res.status < 500) return { status: HEALTH_AMBER, error: `HTTP ${res.status}` };
   return { status: HEALTH_RED, error: `HTTP ${res.status}` };
 }
 
-// ------------------------------------------------------------
-// Strategy: webhook POST (n8n / Make.com)
-// We POST a small "health check" payload. n8n's webhook node returns 200 if
-// the workflow exists and is active; Make.com returns 200 if the scenario
-// is on. Both return 404 when the webhook is unregistered or scenario off.
-// ------------------------------------------------------------
 async function pingWebhookPost(endpoint) {
   const res = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ healthcheck: true, source: 'fc-dashboard-worker' })
   });
-  if (res.status >= 200 && res.status < 400) {
-    return { status: HEALTH_GREEN, error: null };
-  }
-  if (res.status === 404) {
-    return { status: HEALTH_RED, error: 'Webhook not registered (404)' };
-  }
-  if (res.status >= 400 && res.status < 500) {
-    return { status: HEALTH_AMBER, error: `HTTP ${res.status}` };
-  }
+  if (res.status >= 200 && res.status < 400) return { status: HEALTH_GREEN, error: null };
+  if (res.status === 404) return { status: HEALTH_RED, error: 'Webhook not registered (404)' };
+  if (res.status >= 400 && res.status < 500) return { status: HEALTH_AMBER, error: `HTTP ${res.status}` };
   return { status: HEALTH_RED, error: `HTTP ${res.status}` };
 }
 
-// ------------------------------------------------------------
-// fetch with AbortController-based timeout
-// ------------------------------------------------------------
 async function fetchWithTimeout(url, opts = {}) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), CHECK_TIMEOUT_MS);
   try {
     return await fetch(url, { ...opts, signal: ac.signal });
   } catch (err) {
-    if (err.name === 'AbortError') {
-      throw new Error(`Timeout after ${CHECK_TIMEOUT_MS}ms`);
-    }
+    if (err.name === 'AbortError') throw new Error(`Timeout after ${CHECK_TIMEOUT_MS}ms`);
     throw err;
   } finally {
     clearTimeout(timer);
   }
 }
 
-// ============================================================
-// Persistence: write to health_checks + update items
-// ============================================================
 async function persistResult(sb, env, r) {
-  // 1. Append to health_checks log
   const logRes = await sb.fetch(`${env.SUPABASE_URL}/rest/v1/health_checks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
@@ -227,11 +277,8 @@ async function persistResult(sb, env, r) {
       error_message: r.errorMessage
     })
   });
-  if (!logRes.ok) {
-    console.error(`health_checks insert failed for ${r.itemId}:`, await logRes.text());
-  }
+  if (!logRes.ok) console.error(`health_checks insert failed for ${r.itemId}:`, await logRes.text());
 
-  // 2. Update the item's latest snapshot
   const patchRes = await sb.fetch(
     `${env.SUPABASE_URL}/rest/v1/items?id=eq.${r.itemId}`,
     {
@@ -244,13 +291,11 @@ async function persistResult(sb, env, r) {
       })
     }
   );
-  if (!patchRes.ok) {
-    console.error(`items patch failed for ${r.itemId}:`, await patchRes.text());
-  }
+  if (!patchRes.ok) console.error(`items patch failed for ${r.itemId}:`, await patchRes.text());
 }
 
 // ============================================================
-// Tiny Supabase REST helper — service_role key only
+// Supabase REST helper — service_role key
 // ============================================================
 function supabaseClient(env) {
   const headers = {
@@ -270,7 +315,7 @@ function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*', // tighten in Session 7 to the prod domain
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-worker-secret'
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
   };
 }
 

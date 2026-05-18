@@ -1,7 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle2, Clock, DollarSign, Zap, RefreshCw, ExternalLink, User, FileText, Search, LayoutGrid, Layers, X, Link as LinkIcon, ListChecks, BookOpen, ChevronRight, Package, Lock, Unlock, ArrowLeft, CircleDot, Loader2 } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle2, Clock, DollarSign, Zap, RefreshCw, ExternalLink, User, FileText, Search, LayoutGrid, Layers, X, Link as LinkIcon, ListChecks, BookOpen, ChevronRight, Package, Lock, Unlock, ArrowLeft, CircleDot, Loader2, LogOut } from 'lucide-react';
 import { fetchProjects } from './lib/fetchProjects';
 import { triggerHealthCheck } from './lib/worker';
+import { useAuth } from './lib/useAuth';
+import { LoginScreen, PendingAccessScreen } from './components/LoginScreen';
 
 
 const STAGES = [
@@ -63,6 +65,23 @@ function projectHealth(project) {
 }
 
 export default function AIDashboard() {
+  const { status, user, signIn, signOut, error: authError } = useAuth();
+
+  if (status === 'loading') {
+    return (
+      <div style={{ minHeight: '100vh', background: BG, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <Loader2 size={28} className="spin" style={{ color: YELLOW }} strokeWidth={2} />
+        <style>{`.spin { animation: spin 0.8s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+  if (status === 'signed-out') return <LoginScreen onSignIn={signIn} error={authError} />;
+  if (status === 'signed-in-pending') return <PendingAccessScreen email={user?.email} onSignOut={signOut} />;
+
+  return <Dashboard user={user} onSignOut={signOut} />;
+}
+
+function Dashboard({ user, onSignOut }) {
   const [view, setView] = useState({ level: 'projects' });
   const [stageFilter, setStageFilter] = useState('all');
   const [healthFilter, setHealthFilter] = useState('all');
@@ -214,6 +233,18 @@ export default function AIDashboard() {
               <RefreshCw size={13} className={refreshing ? 'spin' : ''} strokeWidth={2.5} />
               Refresh
             </button>
+            <div title={user?.email} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px 6px 6px', background: BG, border: `1px solid ${BORDER}`, borderRadius: 20 }}>
+              {user?.user_metadata?.avatar_url ? (
+                <img src={user.user_metadata.avatar_url} alt="" style={{ width: 22, height: 22, borderRadius: '50%' }} />
+              ) : (
+                <div style={{ width: 22, height: 22, borderRadius: '50%', background: YELLOW, color: BG, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700 }}>
+                  {(user?.email || '?').slice(0, 1).toUpperCase()}
+                </div>
+              )}
+              <button onClick={onSignOut} title="Sign out" style={{ background: 'transparent', border: 'none', color: TEXT_DIM, cursor: 'pointer', padding: 2, display: 'flex', alignItems: 'center' }}>
+                <LogOut size={13} />
+              </button>
+            </div>
           </div>
         </div>
       </header>

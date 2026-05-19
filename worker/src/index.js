@@ -516,7 +516,10 @@ function pickStrategy(endpoint) {
 }
 
 async function pingHttpGet(endpoint) {
-  const res = await fetchWithTimeout(endpoint, { method: 'GET' });
+  const res = await fetchWithTimeout(endpoint, { 
+    method: 'GET',
+    headers: { 'User-Agent': 'fc-health-worker/1.0' }
+  });
   if (res.status >= 200 && res.status < 400) return { status: HEALTH_GREEN, error: null };
   if (res.status >= 400 && res.status < 500) return { status: HEALTH_AMBER, error: `HTTP ${res.status}` };
   return { status: HEALTH_RED, error: `HTTP ${res.status}` };

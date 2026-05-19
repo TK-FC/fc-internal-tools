@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Activity, AlertCircle, CheckCircle2, Clock, DollarSign, Zap, RefreshCw, ExternalLink, User, FileText, Search, LayoutGrid, Layers, X, Link as LinkIcon, ListChecks, BookOpen, ChevronRight, Package, Lock, Unlock, ArrowLeft, CircleDot, Loader2, LogOut } from 'lucide-react';
+import { Activity, AlertCircle, CheckCircle2, Clock, DollarSign, Zap, RefreshCw, ExternalLink, User, FileText, Search, LayoutGrid, Layers, X, Link as LinkIcon, ListChecks, BookOpen, ChevronRight, Package, Lock, Unlock, ArrowLeft, CircleDot, Loader2, LogOut, Plus, Edit3, Archive, Eye, EyeOff } from 'lucide-react';
 import { fetchProjects } from './lib/fetchProjects';
 import { triggerHealthCheck } from './lib/worker';
 import { useAuth } from './lib/useAuth';
 import { LoginScreen, PendingAccessScreen } from './components/LoginScreen';
+import { EditModal, RestoreButton } from './components/EditModal';
 
 
 const STAGES = [
@@ -90,22 +91,22 @@ function Dashboard({ user, onSignOut }) {
   const [refreshing, setRefreshing] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState(new Set());
 
-  // Data state (replaces MOCK_PROJECTS)
+  // Data
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastFetched, setLastFetched] = useState(null);
+  const [showArchived, setShowArchived] = useState(false);
 
-  // Load on mount
-  useEffect(() => {
-    loadProjects();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Modal — { kind: 'project'|'module', mode: 'create'|'edit', item, project }
+  const [modal, setModal] = useState(null);
+
+  useEffect(() => { loadProjects(); /* eslint-disable-next-line */ }, [showArchived]);
 
   async function loadProjects() {
     setError(null);
     try {
-      const data = await fetchProjects();
+      const data = await fetchProjects({ includeArchived: showArchived });
       setProjects(data);
       setLastFetched(new Date());
     } catch (err) {
@@ -123,10 +124,7 @@ function Dashboard({ user, onSignOut }) {
     return next;
   });
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    loadProjects();
-  };
+  const handleRefresh = () => { setRefreshing(true); loadProjects(); };
 
   const filtered = useMemo(() => projects.filter(p => {
     const stage = effectiveStage(p);
@@ -157,16 +155,20 @@ function Dashboard({ user, onSignOut }) {
   }, [filtered, groupBy]);
 
   const totals = useMemo(() => {
-    const allModules = projects.flatMap(p => p.modules);
+    // Totals only count active (non-archived) items
+    const activeProjects = projects.filter(p => !p.archived);
+    const allModules = activeProjects.flatMap(p => p.modules.filter(m => !m.archived));
     return {
-      projects: projects.length,
+      projects: activeProjects.length,
       modules: allModules.length,
       online: allModules.filter(m => m.healthStatus === 'green').length,
       issues: allModules.filter(m => m.healthStatus === 'amber' || m.healthStatus === 'red').length,
-      monthlyCost: projects.reduce((s, p) => s + p.monthlyCost, 0),
-      monthlyCalls: projects.reduce((s, p) => s + p.callsThisMonth, 0)
+      monthlyCost: activeProjects.reduce((s, p) => s + p.monthlyCost, 0),
+      monthlyCalls: activeProjects.reduce((s, p) => s + p.callsThisMonth, 0)
     };
   }, [projects]);
+
+  const archivedCount = useMemo(() => projects.filter(p => p.archived).length, [projects]);
 
   const toggleHealth = (target) => setHealthFilter(prev => prev === target ? 'all' : target);
 
@@ -187,10 +189,12 @@ function Dashboard({ user, onSignOut }) {
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
         .slide-in { animation: slideIn 0.2s ease; }
-        input::placeholder { color: ${TEXT_FAINT}; }
+        input::placeholder, textarea::placeholder { color: ${TEXT_FAINT}; }
         button { font-family: inherit; }
+        input:focus, textarea:focus, select:focus { border-color: ${YELLOW} !important; }
+        .archived-card { opacity: 0.55; }
+        .archived-card:hover { opacity: 0.85; }
 
-        /* Mobile-first responsive */
         .main-padding { padding: 28px 40px; }
         .header-padding { padding: 20px 40px; }
         .filter-bar { flex-wrap: wrap; }
@@ -206,6 +210,7 @@ function Dashboard({ user, onSignOut }) {
           .hide-mobile { display: none; }
           .stack-mobile { flex-direction: column; align-items: stretch !important; }
           .stack-mobile > * { width: 100%; }
+          .modal-row { grid-template-columns: 1fr !important; }
         }
       `}</style>
 
@@ -275,13 +280,11 @@ function Dashboard({ user, onSignOut }) {
 
         {view.level === 'projects' && (
           <>
-            {/* Actionable stats (filters) — visually distinct */}
             <div className="actionable-stats">
               <ActionableStatCard label="Online" value={totals.online} icon={<CheckCircle2 size={18} />} accent="#7DD87D" active={healthFilter === 'online'} onClick={() => toggleHealth('online')} />
               <ActionableStatCard label="Issues" value={totals.issues} icon={<AlertCircle size={18} />} accent="#FF6B6B" active={healthFilter === 'issues'} onClick={() => totals.issues > 0 && toggleHealth('issues')} disabled={totals.issues === 0} />
             </div>
 
-            {/* Read-only stats — compact */}
             <div className="read-only-stats">
               <ReadOnlyStat label="Projects" value={totals.projects} icon={<Package size={13} />} />
               <ReadOnlyStat label="Modules" value={totals.modules} icon={<Layers size={13} />} />
@@ -289,7 +292,6 @@ function Dashboard({ user, onSignOut }) {
               <ReadOnlyStat label="Calls (MTD)" value={totals.monthlyCalls.toLocaleString()} icon={<Activity size={13} />} />
             </div>
 
-            {/* Filter bar */}
             <div className="filter-bar" style={{ display: 'flex', gap: 10, marginBottom: 20, alignItems: 'center' }}>
               <div style={{ position: 'relative', flex: '1 1 220px', maxWidth: 320 }}>
                 <Search size={14} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: TEXT_DIM }} />
@@ -306,14 +308,47 @@ function Dashboard({ user, onSignOut }) {
               </div>
             </div>
 
-            {/* Groups */}
-            {grouped.map(group => <GroupSection key={group.key} group={group} collapsed={collapsedGroups.has(group.key)} onToggle={() => toggleGroup(group.key)} onProjectClick={(id) => setView({ level: 'project', id })} />)}
+            {/* Action row: New project + Show archived */}
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => setModal({ kind: 'project', mode: 'create' })}
+                style={{ background: YELLOW, color: BG, border: 'none', padding: '8px 14px', borderRadius: 4, fontWeight: 600, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                <Plus size={13} strokeWidth={2.5} /> New project
+              </button>
+              <button
+                onClick={() => setShowArchived(v => !v)}
+                title={showArchived ? 'Hide archived' : 'Show archived'}
+                style={{ background: 'transparent', border: `1px solid ${showArchived ? YELLOW : BORDER}`, color: showArchived ? YELLOW : TEXT_DIM, padding: '7px 12px', borderRadius: 4, fontWeight: 600, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+              >
+                {showArchived ? <EyeOff size={12} /> : <Eye size={12} />}
+                {showArchived ? 'Hide archived' : `Show archived${archivedCount > 0 ? ` (${archivedCount})` : ''}`}
+              </button>
+            </div>
+
+            {grouped.map(group => <GroupSection key={group.key} group={group} collapsed={collapsedGroups.has(group.key)} onToggle={() => toggleGroup(group.key)} onProjectClick={(id) => setView({ level: 'project', id })} onRestore={loadProjects} />)}
             {filtered.length === 0 && <div style={{ textAlign: 'center', padding: '60px 20px', color: TEXT_DIM }}>No projects match your filters.</div>}
           </>
         )}
 
-        {view.level === 'project' && selectedProject && <ProjectDetail project={selectedProject} onOpenModule={(moduleId) => setView({ level: 'module', projectId: selectedProject.id, moduleId })} />}
-        {view.level === 'module' && selectedModule && selectedProject && <ModuleDetail module={selectedModule} project={selectedProject} onCheckNow={loadProjects} />}
+        {view.level === 'project' && selectedProject && (
+          <ProjectDetail
+            project={selectedProject}
+            onOpenModule={(moduleId) => setView({ level: 'module', projectId: selectedProject.id, moduleId })}
+            onEdit={() => setModal({ kind: 'project', mode: 'edit', item: selectedProject })}
+            onAddModule={() => setModal({ kind: 'module', mode: 'create', project: selectedProject })}
+            onRestore={loadProjects}
+          />
+        )}
+        {view.level === 'module' && selectedModule && selectedProject && (
+          <ModuleDetail
+            module={selectedModule}
+            project={selectedProject}
+            onCheckNow={loadProjects}
+            onEdit={() => setModal({ kind: 'module', mode: 'edit', item: selectedModule, project: selectedProject })}
+            onRestore={loadProjects}
+          />
+        )}
         {view.level !== 'projects' && !selectedProject && (
           <div style={{ textAlign: 'center', padding: '60px 20px', color: TEXT_DIM, fontSize: 13 }}>
             That project no longer exists. <button onClick={() => setView({ level: 'projects' })} style={{ background: 'transparent', border: 'none', color: YELLOW, cursor: 'pointer', fontSize: 13, fontWeight: 600, padding: 0 }}>Back to all projects</button>
@@ -321,24 +356,34 @@ function Dashboard({ user, onSignOut }) {
         )}
         </>)}
       </main>
+
+      {modal && (
+        <EditModal
+          kind={modal.kind}
+          mode={modal.mode}
+          item={modal.item}
+          project={modal.project}
+          onClose={() => setModal(null)}
+          onSaved={loadProjects}
+        />
+      )}
     </div>
   );
 }
 
 // ============================================================
-// GROUP SECTION (smarter headers)
+// GROUP SECTION
 // ============================================================
 
-function GroupSection({ group, collapsed, onToggle, onProjectClick }) {
+function GroupSection({ group, collapsed, onToggle, onProjectClick, onRestore }) {
   if (!group.label) {
     return (
       <div className="project-grid">
-        {group.projects.map(p => <ProjectCard key={p.id} project={p} onClick={() => onProjectClick(p.id)} />)}
+        {group.projects.map(p => <ProjectCard key={p.id} project={p} onClick={() => onProjectClick(p.id)} onRestore={onRestore} />)}
       </div>
     );
   }
 
-  // Compute group-level health summary
   const healthCounts = group.projects.reduce((acc, p) => {
     const h = projectHealth(p);
     acc[h] = (acc[h] || 0) + 1;
@@ -360,7 +405,7 @@ function GroupSection({ group, collapsed, onToggle, onProjectClick }) {
       </div>
       {!collapsed && (
         <div className="project-grid">
-          {group.projects.map(p => <ProjectCard key={p.id} project={p} onClick={() => onProjectClick(p.id)} />)}
+          {group.projects.map(p => <ProjectCard key={p.id} project={p} onClick={() => onProjectClick(p.id)} onRestore={onRestore} />)}
         </div>
       )}
     </div>
@@ -391,10 +436,9 @@ function Breadcrumb({ view, project, module: mod, onNav }) {
 }
 
 // ============================================================
-// STAT CARDS — TWO VARIANTS
+// STAT CARDS
 // ============================================================
 
-// Big, prominent — for filterable actions
 function ActionableStatCard({ label, value, icon, accent, active, onClick, disabled }) {
   const isClickable = !!onClick && !disabled;
   return (
@@ -421,7 +465,6 @@ function ActionableStatCard({ label, value, icon, accent, active, onClick, disab
   );
 }
 
-// Compact — for context-only data
 function ReadOnlyStat({ label, value, icon, accent }) {
   return (
     <div style={{ background: PANEL, padding: '10px 12px', borderRadius: 4, border: `1px solid ${BORDER}`, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -443,7 +486,7 @@ function FilterChip({ label, active, onClick, icon }) {
 }
 
 // ============================================================
-// THIN PIPELINE BAR (the big visual win)
+// PIPELINE
 // ============================================================
 
 function ThinPipeline({ stage, showLabels }) {
@@ -481,7 +524,6 @@ function ThinPipeline({ stage, showLabels }) {
   );
 }
 
-// Larger pipeline for detail pages — keeps the original block style as the "hero" element
 function PipelineLarge({ stage }) {
   const currentIdx = STAGES.findIndex(s => s.key === stage);
   return (
@@ -511,6 +553,14 @@ function HealthPill({ status, small }) {
   );
 }
 
+function ArchivedBadge() {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 7px', background: 'rgba(255,255,255,0.06)', border: `1px solid ${BORDER}`, borderRadius: 3, fontSize: 10, fontWeight: 600, color: TEXT_DIM, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+      <Archive size={9} /> Archived
+    </span>
+  );
+}
+
 function Stat({ icon, label, value }) {
   return (
     <div>
@@ -529,20 +579,20 @@ function SectionLabel({ children, icon, right }) {
   );
 }
 
-// Module stage preview dots — strip of mini indicators on project cards
 function ModulePreview({ modules }) {
-  if (modules.length === 0) {
+  const active = modules.filter(m => !m.archived);
+  if (active.length === 0) {
     return <div style={{ fontSize: 11, color: TEXT_FAINT, fontStyle: 'italic' }}>Single-unit project (no modules)</div>;
   }
   return (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
         <span style={{ fontSize: 9, color: TEXT_FAINT, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>
-          {modules.length} {modules.length === 1 ? 'module' : 'modules'}
+          {active.length} {active.length === 1 ? 'module' : 'modules'}
         </span>
       </div>
       <div style={{ display: 'flex', gap: 3 }}>
-        {modules.map((m) => {
+        {active.map((m) => {
           const stageLabel = STAGES.find(s => s.key === m.stage)?.label || m.stage;
           return (
             <div key={m.id} title={`${m.name} — ${stageLabel}`} style={{
@@ -557,29 +607,29 @@ function ModulePreview({ modules }) {
 }
 
 // ============================================================
-// PROJECT CARD — denser, with module preview
+// PROJECT CARD
 // ============================================================
 
-function ProjectCard({ project, onClick }) {
+function ProjectCard({ project, onClick, onRestore }) {
   const stage = effectiveStage(project);
   const health = projectHealth(project);
-  const moduleIssues = project.modules.filter(m => m.healthStatus === 'amber' || m.healthStatus === 'red').length;
+  const moduleIssues = project.modules.filter(m => !m.archived && (m.healthStatus === 'amber' || m.healthStatus === 'red')).length;
 
   return (
-    <div className="card-hover" onClick={onClick} style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Row 1: category + health */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div className={`card-hover ${project.archived ? 'archived-card' : ''}`} onClick={onClick} style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: YELLOW }}>{project.category}</span>
-        <HealthPill status={health} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {project.archived && <ArchivedBadge />}
+          <HealthPill status={health} />
+        </div>
       </div>
 
-      {/* Row 2: name + desc */}
       <div>
         <h3 className="display-font" style={{ fontSize: 16, fontWeight: 600, margin: 0, color: TEXT, lineHeight: 1.25 }}>{project.name}</h3>
         <p style={{ fontSize: 12, color: TEXT_DIM, margin: '4px 0 0', lineHeight: 1.45 }}>{project.description}</p>
       </div>
 
-      {/* Row 3: thin pipeline with labels */}
       <div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 5 }}>
           <span style={{ fontSize: 9, color: TEXT_FAINT, textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 600 }}>Pipeline</span>
@@ -590,22 +640,25 @@ function ProjectCard({ project, onClick }) {
         <ThinPipeline stage={stage} showLabels />
       </div>
 
-      {/* Row 4: module preview strip */}
       <ModulePreview modules={project.modules} />
 
-      {/* Row 5: issues alert if any */}
       {moduleIssues > 0 && (
         <div style={{ padding: '6px 9px', background: HEALTH_CONFIG.red.bg, borderRadius: 4, fontSize: 11, color: HEALTH_CONFIG.red.color, display: 'flex', gap: 6, alignItems: 'center' }}>
           <AlertCircle size={12} />{moduleIssues} module{moduleIssues > 1 ? 's' : ''} with issues
         </div>
       )}
 
-      {/* Row 6: footer stats — only 2, not 4 */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 10, borderTop: `1px solid ${BORDER}`, fontSize: 11, color: TEXT_DIM }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><User size={11} /> {project.owner}</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><DollarSign size={11} /> {formatCurrency(project.monthlyCost)}/mo</span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}><Activity size={11} /> {project.callsThisMonth.toLocaleString()}</span>
       </div>
+
+      {project.archived && (
+        <div onClick={(e) => e.stopPropagation()} style={{ paddingTop: 6 }}>
+          <RestoreButton kind="project" id={project.id} onDone={onRestore} />
+        </div>
+      )}
     </div>
   );
 }
@@ -614,19 +667,28 @@ function ProjectCard({ project, onClick }) {
 // PROJECT DETAIL
 // ============================================================
 
-function ProjectDetail({ project, onOpenModule }) {
+function ProjectDetail({ project, onOpenModule, onEdit, onAddModule, onRestore }) {
   const stage = effectiveStage(project);
   const health = projectHealth(project);
+  const visibleModules = project.modules; // archived filtering already applied by fetch
 
   return (
     <div className="slide-in">
-      <div style={{ background: PANEL, borderRadius: 8, border: `1px solid ${BORDER}`, padding: 24, marginBottom: 20, position: 'relative', overflow: 'hidden' }}>
+      <div style={{ background: PANEL, borderRadius: 8, border: `1px solid ${BORDER}`, padding: 24, marginBottom: 20, position: 'relative', overflow: 'hidden', opacity: project.archived ? 0.7 : 1 }}>
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: YELLOW }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: YELLOW }}>{project.category}</span>
           <span style={{ color: BORDER }}>|</span>
           <span style={{ fontSize: 11, color: TEXT_DIM }}>Owner: {project.owner}</span>
-          <div style={{ marginLeft: 'auto' }}><HealthPill status={health} /></div>
+          {project.archived && <ArchivedBadge />}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            {project.archived ? (
+              <RestoreButton kind="project" id={project.id} onDone={onRestore} />
+            ) : (
+              <button onClick={onEdit} style={editBtnStyle}><Edit3 size={12} /> Edit</button>
+            )}
+            <HealthPill status={health} />
+          </div>
         </div>
         <h2 className="display-font" style={{ fontSize: 26, fontWeight: 700, margin: 0, color: TEXT, lineHeight: 1.15 }}>{project.name}</h2>
         <p style={{ fontSize: 13.5, color: TEXT_DIM, margin: '8px 0 20px', lineHeight: 1.5 }}>{project.description}</p>
@@ -641,7 +703,7 @@ function ProjectDetail({ project, onOpenModule }) {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 14, marginTop: 20, paddingTop: 18, borderTop: `1px solid ${BORDER}` }}>
           <Stat icon={<DollarSign size={11} />} label="Monthly" value={formatCurrency(project.monthlyCost)} />
           <Stat icon={<Activity size={11} />} label="Calls (MTD)" value={project.callsThisMonth.toLocaleString()} />
-          <Stat icon={<Layers size={11} />} label="Modules" value={project.modules.length} />
+          <Stat icon={<Layers size={11} />} label="Modules" value={visibleModules.filter(m => !m.archived).length} />
           <Stat icon={<LinkIcon size={11} />} label="Status" value={project.projectLink ? 'Live' : 'Not deployed'} />
         </div>
       </div>
@@ -649,7 +711,7 @@ function ProjectDetail({ project, onOpenModule }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, marginBottom: 20 }}>
         <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18 }}>
           <SectionLabel icon={<BookOpen size={12} />}>Brief</SectionLabel>
-          <div style={{ fontSize: 13, color: TEXT, lineHeight: 1.55 }}>{project.brief}</div>
+          <div style={{ fontSize: 13, color: TEXT, lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{project.brief || <em style={{ color: TEXT_FAINT }}>No brief yet.</em>}</div>
           {project.projectLink && (
             <a href={project.projectLink} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 14, padding: '7px 11px', border: `1px solid ${YELLOW}`, borderRadius: 4, color: YELLOW, fontSize: 12, fontWeight: 600, textDecoration: 'none' }}>
               <LinkIcon size={12} /> Open project <ExternalLink size={10} />
@@ -658,31 +720,39 @@ function ProjectDetail({ project, onOpenModule }) {
         </div>
         <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18 }}>
           <SectionLabel icon={<ListChecks size={12} />}>Feature Wish List</SectionLabel>
-          <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {project.wishList.map((item, idx) => (
-              <li key={idx} style={{ padding: '7px 11px', background: BG, borderRadius: 4, border: `1px solid ${BORDER}`, fontSize: 12.5, color: TEXT, display: 'flex', alignItems: 'flex-start', gap: 9 }}>
-                <span style={{ flexShrink: 0, width: 15, height: 15, borderRadius: 3, background: `${YELLOW}20`, color: YELLOW, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, marginTop: 1 }}>{idx + 1}</span>
-                {item}
-              </li>
-            ))}
-          </ul>
+          {project.wishList.length === 0 ? (
+            <div style={{ fontSize: 13, color: TEXT_FAINT, fontStyle: 'italic' }}>Empty. Add items from the Edit form.</div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {project.wishList.map((item, idx) => (
+                <li key={idx} style={{ padding: '7px 11px', background: BG, borderRadius: 4, border: `1px solid ${BORDER}`, fontSize: 12.5, color: TEXT, display: 'flex', alignItems: 'flex-start', gap: 9 }}>
+                  <span style={{ flexShrink: 0, width: 15, height: 15, borderRadius: 3, background: `${YELLOW}20`, color: YELLOW, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, marginTop: 1 }}>{idx + 1}</span>
+                  {item}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
 
-      {/* Modules — now dense rows instead of cards */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <h3 className="display-font" style={{ fontSize: 14, fontWeight: 700, margin: 0, color: TEXT, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Modules</h3>
-        <span style={{ fontSize: 11, color: TEXT_FAINT, padding: '2px 8px', background: PANEL, borderRadius: 10 }}>{project.modules.length}</span>
+        <span style={{ fontSize: 11, color: TEXT_FAINT, padding: '2px 8px', background: PANEL, borderRadius: 10 }}>{visibleModules.length}</span>
         <div style={{ height: 1, flex: 1, background: BORDER }} />
+        {!project.archived && (
+          <button onClick={onAddModule} style={addModuleBtnStyle}>
+            <Plus size={12} /> Add module
+          </button>
+        )}
       </div>
 
-      {project.modules.length === 0 ? (
+      {visibleModules.length === 0 ? (
         <div style={{ background: PANEL, borderRadius: 6, border: `1px dashed ${BORDER}`, padding: 28, textAlign: 'center', color: TEXT_DIM, fontSize: 13 }}>
           No modules yet. This project is being built as a single unit.
         </div>
       ) : (
         <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, overflow: 'hidden' }}>
-          {project.modules.map((m, idx) => <ModuleRow key={m.id} module={m} onClick={() => onOpenModule(m.id)} isLast={idx === project.modules.length - 1} />)}
+          {visibleModules.map((m, idx) => <ModuleRow key={m.id} module={m} onClick={() => onOpenModule(m.id)} isLast={idx === visibleModules.length - 1} />)}
         </div>
       )}
     </div>
@@ -690,20 +760,19 @@ function ProjectDetail({ project, onOpenModule }) {
 }
 
 // ============================================================
-// MODULE ROW — dense list view (replaces module cards)
+// MODULE ROW
 // ============================================================
 
 function ModuleRow({ module: mod, onClick, isLast }) {
-  const taskCount = mod.tasks?.length || 0;
-  const tasksDone = mod.tasks?.filter(t => t.done).length || 0;
   const stageIdx = STAGES.findIndex(s => s.key === mod.stage);
 
   return (
-    <div className="module-row" onClick={onClick} style={{ padding: '14px 18px', borderBottom: isLast ? 'none' : `1px solid ${BORDER}`, cursor: 'pointer', display: 'grid', gridTemplateColumns: 'auto 1fr auto auto auto', gap: 16, alignItems: 'center', transition: 'background 0.15s' }}>
+    <div className={`module-row ${mod.archived ? 'archived-card' : ''}`} onClick={onClick} style={{ padding: '14px 18px', borderBottom: isLast ? 'none' : `1px solid ${BORDER}`, cursor: 'pointer', display: 'grid', gridTemplateColumns: 'auto 1fr auto auto auto', gap: 16, alignItems: 'center', transition: 'background 0.15s' }}>
       <Package size={14} style={{ color: TEXT_FAINT }} />
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
           <span className="display-font" style={{ fontSize: 14, fontWeight: 600, color: TEXT }}>{mod.name}</span>
+          {mod.archived && <ArchivedBadge />}
           {mod.lastError && <span style={{ fontSize: 10, color: HEALTH_CONFIG[mod.healthStatus].color, fontWeight: 500 }}>· {mod.lastError}</span>}
         </div>
         <div style={{ width: 180 }}><ThinPipeline stage={mod.stage} /></div>
@@ -721,7 +790,7 @@ function ModuleRow({ module: mod, onClick, isLast }) {
 // MODULE DETAIL
 // ============================================================
 
-function ModuleDetail({ module: mod, project, onCheckNow }) {
+function ModuleDetail({ module: mod, project, onCheckNow, onEdit, onRestore }) {
   const [checking, setChecking] = useState(false);
   const [checkError, setCheckError] = useState(null);
   const [lastResult, setLastResult] = useState(null);
@@ -733,7 +802,6 @@ function ModuleDetail({ module: mod, project, onCheckNow }) {
     try {
       const result = await triggerHealthCheck(mod.id);
       setLastResult(result);
-      // Refetch projects so the new health status flows through the UI
       if (onCheckNow) await onCheckNow();
     } catch (err) {
       console.error('[Check now] failed:', err);
@@ -745,16 +813,24 @@ function ModuleDetail({ module: mod, project, onCheckNow }) {
 
   return (
     <div className="slide-in">
-      <div style={{ background: PANEL, borderRadius: 8, border: `1px solid ${BORDER}`, padding: 24, marginBottom: 16, position: 'relative', overflow: 'hidden' }}>
+      <div style={{ background: PANEL, borderRadius: 8, border: `1px solid ${BORDER}`, padding: 24, marginBottom: 16, position: 'relative', overflow: 'hidden', opacity: mod.archived ? 0.7 : 1 }}>
         <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: YELLOW }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: YELLOW, display: 'flex', alignItems: 'center', gap: 5 }}>
             <Package size={11} /> Module of {project.name}
           </span>
-          <div style={{ marginLeft: 'auto' }}><HealthPill status={mod.healthStatus} /></div>
+          {mod.archived && <ArchivedBadge />}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+            {mod.archived ? (
+              <RestoreButton kind="module" id={mod.id} onDone={onRestore} />
+            ) : (
+              <button onClick={onEdit} style={editBtnStyle}><Edit3 size={12} /> Edit</button>
+            )}
+            <HealthPill status={mod.healthStatus} />
+          </div>
         </div>
         <h2 className="display-font" style={{ fontSize: 24, fontWeight: 700, margin: 0, color: TEXT, lineHeight: 1.15 }}>{mod.name}</h2>
-        <p style={{ fontSize: 13, color: TEXT_DIM, margin: '8px 0 20px', lineHeight: 1.5 }}>{mod.brief}</p>
+        <p style={{ fontSize: 13, color: TEXT_DIM, margin: '8px 0 20px', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{mod.brief || <em style={{ color: TEXT_FAINT }}>No brief yet.</em>}</p>
 
         <SectionLabel>Pipeline</SectionLabel>
         <PipelineLarge stage={mod.stage} />
@@ -817,7 +893,7 @@ function ModuleDetail({ module: mod, project, onCheckNow }) {
       <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18 }}>
         <SectionLabel icon={<ListChecks size={12} />}>Tasks</SectionLabel>
         {(mod.tasks?.length || 0) === 0 ? (
-          <div style={{ fontSize: 13, color: TEXT_FAINT, fontStyle: 'italic' }}>No tasks yet for this module.</div>
+          <div style={{ fontSize: 13, color: TEXT_FAINT, fontStyle: 'italic' }}>No tasks yet for this module. (Task editing lands in Session 6b.)</div>
         ) : (
           <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
             {mod.tasks.map((t) => (
@@ -832,3 +908,17 @@ function ModuleDetail({ module: mod, project, onCheckNow }) {
     </div>
   );
 }
+
+// ============================================================
+// Shared button styles for Edit / Add module
+// ============================================================
+const editBtnStyle = {
+  background: 'transparent', border: `1px solid ${YELLOW}`, color: YELLOW,
+  borderRadius: 4, padding: '6px 10px', fontWeight: 600, fontSize: 11,
+  cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'inherit'
+};
+const addModuleBtnStyle = {
+  background: YELLOW, color: BG, border: 'none', borderRadius: 4,
+  padding: '6px 11px', fontWeight: 600, fontSize: 11, cursor: 'pointer',
+  display: 'inline-flex', alignItems: 'center', gap: 5, fontFamily: 'inherit'
+};

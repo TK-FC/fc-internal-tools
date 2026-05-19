@@ -17,7 +17,7 @@
 //
 // All write endpoints:
 //   - Require Authorization: Bearer <Supabase JWT>
-//   - Verify JWT, enforce @foodiecoaches.com domain, check allowlist
+//   - Verify JWT (ES256 via Supabase JWKS), check allowlist
 //   - Read the existing row first (so audit_log has a 'before' snapshot)
 //   - Apply the change via service_role
 //   - Write one row to audit_log with email + action + before/after diff
@@ -25,7 +25,7 @@
 // Required secrets (set with `wrangler secret put NAME`):
 //   SUPABASE_URL           — e.g. https://xxxxx.supabase.co (NO trailing slash)
 //   SUPABASE_SERVICE_KEY   — service_role key
-//   SUPABASE_JWT_SECRET    — JWT signing secret
+//   (SUPABASE_JWT_SECRET is no longer used — safe to delete after deploy)
 // ============================================================
 
 const HEALTH_GREEN = 'green';
@@ -33,6 +33,12 @@ const HEALTH_AMBER = 'amber';
 const HEALTH_RED = 'red';
 
 const CHECK_TIMEOUT_MS = 5000;
+
+// Allowed browser origins. Add staging/preview URLs here if needed.
+const ALLOWED_ORIGINS = [
+  'https://tk-fc.github.io',
+  'http://localhost:5173'
+];
 
 // Whitelist of fields the client is allowed to write per type. Anything
 // not in this list is dropped silently — protects health_status,
@@ -61,18 +67,18 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
     // GET / — sanity check, no auth
     if (url.pathname === '/' && request.method === 'GET') {
-      return json({ ok: true, service: 'fc-health-worker' });
+      return json(request, { ok: true, service: 'fc-health-worker' });
     }
 
     // Everything below requires auth
     const authResult = await authenticate(request, env);
     if (!authResult.ok) {
-      return json({ error: authResult.error }, authResult.status);
+      return json(request, { error: authResult.error }, authResult.status);
     }
     const { email } = authResult;
 
@@ -82,7 +88,7 @@ export default {
       const result = await runHealthChecks(env, {
         trigger: 'manual', itemId, triggeredBy: email
       });
-      return json(result);
+      return json(request, result);
     }
 
     // ---- Projects ----
@@ -91,9 +97,9 @@ export default {
     }
     let m = url.pathname.match(/^\/projects\/([0-9a-f-]{36})$/i);
     if (m && request.method === 'PATCH')  return handleUpdate(request, env, email, 'project', m[1]);
-    if (m && request.method === 'DELETE') return handleArchive(env, email, 'project', m[1], true);
+    if (m && request.method === 'DELETE') return handleArchive(request, env, email, 'project', m[1], true);
     m = url.pathname.match(/^\/projects\/([0-9a-f-]{36})\/restore$/i);
-    if (m && request.method === 'POST')   return handleArchive(env, email, 'project', m[1], false);
+    if (m && request.method === 'POST')   return handleArchive(request, env, email, 'project', m[1], false);
 
     // ---- Modules ----
     if (url.pathname === '/modules' && request.method === 'POST') {
@@ -101,11 +107,11 @@ export default {
     }
     m = url.pathname.match(/^\/modules\/([0-9a-f-]{36})$/i);
     if (m && request.method === 'PATCH')  return handleUpdate(request, env, email, 'module', m[1]);
-    if (m && request.method === 'DELETE') return handleArchive(env, email, 'module', m[1], true);
+    if (m && request.method === 'DELETE') return handleArchive(request, env, email, 'module', m[1], true);
     m = url.pathname.match(/^\/modules\/([0-9a-f-]{36})\/restore$/i);
-    if (m && request.method === 'POST')   return handleArchive(env, email, 'module', m[1], false);
+    if (m && request.method === 'POST')   return handleArchive(request, env, email, 'module', m[1], false);
 
-    return json({ error: 'not found' }, 404);
+    return json(request, { error: 'not found' }, 404);
   }
 };
 
@@ -116,7 +122,7 @@ export default {
 async function handleCreate(request, env, email, type) {
   let body;
   try { body = await request.json(); }
-  catch { return json({ error: 'invalid JSON body' }, 400); }
+  catch { return json(request, { error: 'invalid JSON body' }, 400); }
 
   // Strip to writable fields + force type
   const writable = type === 'project' ? PROJECT_WRITABLE : MODULE_WRITABLE;
@@ -127,15 +133,15 @@ async function handleCreate(request, env, email, type) {
 
   // Required fields per type
   if (!row.name || !row.name.trim()) {
-    return json({ error: 'name is required' }, 400);
+    return json(request, { error: 'name is required' }, 400);
   }
   if (type === 'project') {
-    if (!row.category) return json({ error: 'category is required' }, 400);
-    if (!row.owner)    return json({ error: 'owner is required' }, 400);
+    if (!row.category) return json(request, { error: 'category is required' }, 400);
+    if (!row.owner)    return json(request, { error: 'owner is required' }, 400);
     if (!row.stage_mode) row.stage_mode = 'manual';
     if (!row.stage)      row.stage = 'ideation';
   } else {
-    if (!row.parent_id) return json({ error: 'parent_id is required for modules' }, 400);
+    if (!row.parent_id) return json(request, { error: 'parent_id is required for modules' }, 400);
     if (!row.stage)     row.stage = 'ideation';
   }
 
@@ -153,7 +159,7 @@ async function handleCreate(request, env, email, type) {
 
   if (!res.ok) {
     const text = await res.text();
-    return json({ error: `insert failed: ${res.status} ${text}` }, 500);
+    return json(request, { error: `insert failed: ${res.status} ${text}` }, 500);
   }
   const inserted = (await res.json())[0];
 
@@ -165,19 +171,19 @@ async function handleCreate(request, env, email, type) {
     details: { after: inserted }
   });
 
-  return json({ ok: true, item: inserted });
+  return json(request, { ok: true, item: inserted });
 }
 
 async function handleUpdate(request, env, email, type, id) {
   let body;
   try { body = await request.json(); }
-  catch { return json({ error: 'invalid JSON body' }, 400); }
+  catch { return json(request, { error: 'invalid JSON body' }, 400); }
 
   // Read the 'before' for the audit log
   const before = await fetchItem(env, id);
-  if (!before) return json({ error: 'not found' }, 404);
+  if (!before) return json(request, { error: 'not found' }, 404);
   if (before.type !== type) {
-    return json({ error: `id is a ${before.type}, not a ${type}` }, 400);
+    return json(request, { error: `id is a ${before.type}, not a ${type}` }, 400);
   }
 
   // Strip to writable fields
@@ -187,7 +193,7 @@ async function handleUpdate(request, env, email, type, id) {
     if (writable.has(k)) patch[k] = v;
   }
   if (Object.keys(patch).length === 0) {
-    return json({ error: 'no writable fields in body' }, 400);
+    return json(request, { error: 'no writable fields in body' }, 400);
   }
 
   const sb = supabaseClient(env);
@@ -201,7 +207,7 @@ async function handleUpdate(request, env, email, type, id) {
   );
   if (!res.ok) {
     const text = await res.text();
-    return json({ error: `update failed: ${res.status} ${text}` }, 500);
+    return json(request, { error: `update failed: ${res.status} ${text}` }, 500);
   }
   const after = (await res.json())[0];
 
@@ -221,18 +227,18 @@ async function handleUpdate(request, env, email, type, id) {
     details: { changed: diff }
   });
 
-  return json({ ok: true, item: after });
+  return json(request, { ok: true, item: after });
 }
 
 // Soft delete (archived = true) or restore (archived = false)
-async function handleArchive(env, email, type, id, archive) {
+async function handleArchive(request, env, email, type, id, archive) {
   const before = await fetchItem(env, id);
-  if (!before) return json({ error: 'not found' }, 404);
+  if (!before) return json(request, { error: 'not found' }, 404);
   if (before.type !== type) {
-    return json({ error: `id is a ${before.type}, not a ${type}` }, 400);
+    return json(request, { error: `id is a ${before.type}, not a ${type}` }, 400);
   }
   if (before.archived === archive) {
-    return json({ ok: true, item: before, message: archive ? 'already archived' : 'already active' });
+    return json(request, { ok: true, item: before, message: archive ? 'already archived' : 'already active' });
   }
 
   const sb = supabaseClient(env);
@@ -266,7 +272,7 @@ async function handleArchive(env, email, type, id, archive) {
   );
   if (!res.ok) {
     const text = await res.text();
-    return json({ error: `archive failed: ${res.status} ${text}` }, 500);
+    return json(request, { error: `archive failed: ${res.status} ${text}` }, 500);
   }
   const after = (await res.json())[0];
 
@@ -281,7 +287,7 @@ async function handleArchive(env, email, type, id, archive) {
     }
   });
 
-  return json({ ok: true, item: after });
+  return json(request, { ok: true, item: after });
 }
 
 // ============================================================
@@ -326,70 +332,127 @@ async function writeAudit(env, entry) {
 }
 
 // ============================================================
-// AUTH (unchanged from Session 5)
+// AUTH: verify Supabase ES256 JWT via JWKS + check allowlist
 // ============================================================
+
+// Module-scope cache for the JWKS. Survives across requests on the same
+// Worker instance but resets on cold start. JWKS rarely changes and a
+// cold-start refresh costs ~50ms, so 1-hour TTL is fine.
+let jwksCache = null;
+let jwksCacheAt = 0;
+const JWKS_TTL_MS = 60 * 60 * 1000;
+
+async function getJwks(env) {
+  const now = Date.now();
+  if (jwksCache && now - jwksCacheAt < JWKS_TTL_MS) return jwksCache;
+
+  const url = `${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`;
+  const res = await fetch(url, {
+    headers: { apikey: env.SUPABASE_SERVICE_KEY }
+  });
+  if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+  jwksCache = await res.json();
+  jwksCacheAt = now;
+  return jwksCache;
+}
+
 async function authenticate(request, env) {
-  const header = request.headers.get('Authorization') || '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) return { ok: false, status: 401, error: 'missing bearer token' };
-  const token = match[1];
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return { ok: false, error: 'missing bearer token', status: 401 };
+  }
+  const token = authHeader.slice(7);
 
   let payload;
-  try { payload = await verifyJwt(token, env.SUPABASE_JWT_SECRET); }
-  catch (err) { return { ok: false, status: 401, error: `invalid token: ${err.message}` }; }
-
-  const email = (payload.email || '').toLowerCase();
-  if (!email) return { ok: false, status: 403, error: 'token has no email claim' };
-  if (!email.endsWith('@foodiecoaches.com')) {
-    return { ok: false, status: 403, error: 'domain not allowed' };
+  try {
+    payload = await verifyJwt(token, env);
+  } catch (e) {
+    return { ok: false, error: `invalid token: ${e.message}`, status: 401 };
   }
 
+  const email = (payload.email || '').toLowerCase();
+  if (!email) {
+    return { ok: false, error: 'no email claim', status: 401 };
+  }
+
+  // Belt-and-braces: enforce the @foodiecoaches.com cap server-side too.
+  if (!email.endsWith('@foodiecoaches.com')) {
+    return { ok: false, error: 'domain not allowed', status: 403 };
+  }
+
+  // Check allowlist
   const sb = supabaseClient(env);
   const res = await sb.fetch(
-    `${env.SUPABASE_URL}/rest/v1/access_allowlist?select=email,active&email=eq.${encodeURIComponent(email)}`
+    `${env.SUPABASE_URL}/rest/v1/access_allowlist?email=eq.${encodeURIComponent(email)}&active=eq.true&select=email`
   );
-  if (!res.ok) return { ok: false, status: 500, error: 'allowlist check failed' };
+  if (!res.ok) {
+    return { ok: false, error: 'allowlist check failed', status: 500 };
+  }
   const rows = await res.json();
-  if (rows.length === 0 || rows[0].active !== true) {
-    return { ok: false, status: 403, error: 'not on allowlist' };
+  if (rows.length === 0) {
+    return { ok: false, error: 'not on allowlist', status: 403 };
   }
 
   return { ok: true, email };
 }
 
-async function verifyJwt(token, secret) {
+async function verifyJwt(token, env) {
   const parts = token.split('.');
-  if (parts.length !== 3) throw new Error('malformed');
-  const [headerB64, payloadB64, sigB64] = parts;
+  if (parts.length !== 3) throw new Error('malformed token');
 
-  const header = JSON.parse(b64UrlDecodeStr(headerB64));
-  if (header.alg !== 'HS256') throw new Error(`unexpected alg ${header.alg}`);
+  const [headerB64, payloadB64, signatureB64] = parts;
+  const header = JSON.parse(base64UrlDecodeToString(headerB64));
+  const payload = JSON.parse(base64UrlDecodeToString(payloadB64));
 
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', enc.encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+  if (header.alg !== 'ES256') {
+    throw new Error(`unexpected alg ${header.alg}`);
+  }
+
+  // Find matching key in JWKS by kid
+  const jwks = await getJwks(env);
+  const jwk = jwks.keys.find(k => k.kid === header.kid);
+  if (!jwk) throw new Error(`no matching key for kid ${header.kid}`);
+
+  // Import the public key for ECDSA verification
+  const publicKey = await crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify']
   );
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const sig = b64UrlDecodeBytes(sigB64);
-  const valid = await crypto.subtle.verify('HMAC', key, sig, data);
-  if (!valid) throw new Error('bad signature');
 
-  const payload = JSON.parse(b64UrlDecodeStr(payloadB64));
+  // Verify the signature
+  const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const signature = base64UrlDecode(signatureB64);
+
+  const valid = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    publicKey,
+    signature,
+    signingInput
+  );
+  if (!valid) throw new Error('signature verification failed');
+
+  // Check expiry
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp && now >= payload.exp) throw new Error('expired');
-  if (payload.nbf && now < payload.nbf) throw new Error('not yet valid');
+  if (payload.exp && payload.exp < now) throw new Error('token expired');
+
   return payload;
 }
 
-function b64UrlDecodeStr(s) { return new TextDecoder().decode(b64UrlDecodeBytes(s)); }
-function b64UrlDecodeBytes(s) {
+// Base64url decode helpers — used by verifyJwt + JWKS verification
+function base64UrlDecode(s) {
   const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
   const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return bytes;
+}
+
+function base64UrlDecodeToString(s) {
+  return new TextDecoder().decode(base64UrlDecode(s));
 }
 
 // ============================================================
@@ -524,17 +587,20 @@ function supabaseClient(env) {
 // ============================================================
 // HTTP helpers
 // ============================================================
-function corsHeaders() {
+function corsHeaders(request) {
+  const origin = request?.headers.get('Origin');
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Vary': 'Origin'
   };
 }
 
-function json(body, status = 200) {
+function json(request, body, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(request) }
   });
 }

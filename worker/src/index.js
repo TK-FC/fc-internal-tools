@@ -499,15 +499,18 @@ async function runHealthChecks(env, { trigger, itemId = null, triggeredBy = null
 async function checkOne(item) {
   const t0 = Date.now();
   const base = { itemId: item.id, name: item.name, endpoint: item.endpoint };
+  console.log(`[checkOne] item: ${JSON.stringify(item)}`);
   try {
     const strategy = pickStrategy(item.endpoint);
+    console.log(`[checkOne] strategy picked: ${strategy.name}`);
     const { status, error } = await strategy(item.endpoint);
+    console.log(`[checkOne] strategy returned: status=${status} error=${error}`);
     return { ...base, status, errorMessage: error, responseTimeMs: Date.now() - t0 };
   } catch (err) {
+    console.log(`[checkOne] caught error: ${err.message}`);
     return { ...base, status: HEALTH_RED, errorMessage: err.message || String(err), responseTimeMs: Date.now() - t0 };
   }
 }
-
 function pickStrategy(endpoint) {
   const url = endpoint.toLowerCase();
   if (url.includes('/webhook/') || url.includes('/webhook-test/')) return pingWebhookPost;

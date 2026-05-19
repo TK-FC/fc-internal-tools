@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build --base=/fc-internal-tools/",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview --base=/fc-internal-tools/"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.4",

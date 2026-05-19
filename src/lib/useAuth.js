@@ -92,7 +92,7 @@ export function useAuth() {
         // never even gets back to Supabase. Belt-and-braces with the OAuth
         // consent screen's "Internal" user-type setting.
         queryParams: { hd: 'foodiecoaches.com', prompt: 'select_account' },
-        redirectTo: window.location.origin
+        redirectTo: window.location.origin + import.meta.env.BASE_URL
       }
     });
     if (sErr) setError(sErr.message);

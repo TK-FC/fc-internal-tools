@@ -9,6 +9,12 @@ import { supabase } from './supabase';
 //
 // If any column name in the actual schema differs, fix it in mapProject /
 // mapModule below — that's the only place column names appear.
+//   monthly_cost (numeric, project only)
+//   calls_this_month (int, project only)
+//   endpoint (text, project or module)
+//   health_status (text: green | amber | red | none) — project or module
+//   last_health_check (timestamptz) — project or module
+//   last_error (text) — project or module
 
 function mapProject(row) {
   return {
@@ -22,11 +28,15 @@ function mapProject(row) {
     description: row.description,
     projectLink: row.project_link,
     brief: row.brief,
-    wishList: Array.isArray(row.wish_list) ? row.wish_list : [],
     monthlyCost: Number(row.monthly_cost ?? 0),
     callsThisMonth: row.calls_this_month ?? 0,
-    archived: !!row.archived,
-    sortOrder: row.sort_order ?? 0,
+    // Project-level endpoint + health (same shape as modules)
+    endpoint: row.endpoint,
+    healthStatus: row.health_status ?? 'none',
+    lastHealthCheck: row.last_health_check,
+    lastError: row.last_error,
+    // wishList + modules populated by caller after grouping
+    wishList: [],
     modules: []
   };
 }

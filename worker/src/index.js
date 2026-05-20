@@ -46,7 +46,7 @@ const ALLOWED_ORIGINS = [
 const PROJECT_WRITABLE = new Set([
   'name', 'category', 'owner', 'stage', 'stage_mode', 'description',
   'brief', 'wish_list', 'project_link', 'monthly_cost', 'calls_this_month',
-  'sort_order'
+  'sort_order', 'endpoint'
 ]);
 const MODULE_WRITABLE = new Set([
   'name', 'stage', 'module_brief', 'endpoint', 'sort_order', 'parent_id'
@@ -195,7 +195,20 @@ async function handleUpdate(request, env, email, type, id) {
   if (Object.keys(patch).length === 0) {
     return json(request, { error: 'no writable fields in body' }, 400);
   }
-
+  
+  // Auto-clear stale health state when the endpoint is removed or changed.
+  // Without this, a previously-failing endpoint leaves health_status='red'
+  // and last_error set forever, even after the URL no longer exists.
+  if ('endpoint' in patch) {
+    const newEndpoint = patch.endpoint || null;
+    const oldEndpoint = before.endpoint || null;
+    if (newEndpoint !== oldEndpoint) {
+      patch.health_status = 'none';
+      patch.last_error = null;
+      patch.last_health_check = null;
+    }
+  }
+  
   const sb = supabaseClient(env);
   const res = await sb.fetch(
     `${env.SUPABASE_URL}/rest/v1/items?id=eq.${id}`,

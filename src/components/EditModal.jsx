@@ -53,9 +53,11 @@ export function EditModal({ kind, mode, item, project, onClose, onSaved }) {
   const [wishList, setWishList] = useState(item?.wishList || []);
   const [wishInput, setWishInput] = useState('');
 
+  // Endpoint — used by both projects and modules
+  const [endpoint, setEndpoint] = useState(item?.endpoint || '');
+
   // Module-only
   const [moduleBrief, setModuleBrief] = useState(item?.brief || '');
-  const [endpoint, setEndpoint] = useState(item?.endpoint || '');
 
   // -------- ui state --------
   const [saving, setSaving] = useState(false);
@@ -100,7 +102,8 @@ export function EditModal({ kind, mode, item, project, onClose, onSaved }) {
           project_link: projectLink.trim() || null,
           monthly_cost: Number(monthlyCost) || 0,
           calls_this_month: Number(callsThisMonth) || 0,
-          wish_list: wishList
+          wish_list: wishList,
+          endpoint: endpoint.trim() || null
         };
         if (isEdit) await updateProject(item.id, fields);
         else        await createProject(fields);
@@ -207,6 +210,10 @@ export function EditModal({ kind, mode, item, project, onClose, onSaved }) {
                 <input value={projectLink} onChange={(e) => setProjectLink(e.target.value)} style={inputStyle} placeholder="https://..." />
               </Field>
 
+              <Field label="Endpoint" hint="Health-check URL for the project as a whole. Clearing this removes any stale issue flag on next save.">
+                <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} style={inputStyle} placeholder="https://..." />
+              </Field>
+
               <Row>
                 <Field label="Monthly cost (AUD)">
                   <input type="number" min="0" step="0.01" value={monthlyCost} onChange={(e) => setMonthlyCost(e.target.value)} style={inputStyle} />
@@ -255,7 +262,7 @@ export function EditModal({ kind, mode, item, project, onClose, onSaved }) {
                 <textarea value={moduleBrief} onChange={(e) => setModuleBrief(e.target.value)} style={textareaStyle} rows={3} />
               </Field>
 
-              <Field label="Endpoint" hint="Health-check URL. n8n / Make / generic HTTP all supported.">
+              <Field label="Endpoint" hint="Health-check URL. n8n / Make / generic HTTP all supported. Clearing this removes any stale issue flag on next save.">
                 <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} style={inputStyle} placeholder="https://..." />
               </Field>
             </>

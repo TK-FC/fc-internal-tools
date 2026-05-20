@@ -62,7 +62,14 @@ function rollupHealth(modules) {
   return modules.reduce((worst, m) => order[m.healthStatus] < order[worst] ? m.healthStatus : worst, 'none');
 }
 function projectHealth(project) {
-  return project.modules.length === 0 ? 'none' : rollupHealth(project.modules);
+  // Build a list of health states to roll up: the project's own endpoint
+  // (if it has one) + every module's health. Worst wins.
+  const states = [];
+  if (project.endpoint) states.push(project.healthStatus || 'none');
+  for (const m of project.modules) states.push(m.healthStatus);
+  if (states.length === 0) return 'none';
+  const order = { red: 0, amber: 1, green: 2, none: 3 };
+  return states.reduce((worst, s) => order[s] < order[worst] ? s : worst, 'none');
 }
 
 export default function AIDashboard() {
@@ -338,6 +345,7 @@ function Dashboard({ user, onSignOut }) {
             onEdit={() => setModal({ kind: 'project', mode: 'edit', item: selectedProject })}
             onAddModule={() => setModal({ kind: 'module', mode: 'create', project: selectedProject })}
             onRestore={loadProjects}
+            onCheckNow={loadProjects}
           />
         )}
         {view.level === 'module' && selectedModule && selectedProject && (
@@ -667,10 +675,30 @@ function ProjectCard({ project, onClick, onRestore }) {
 // PROJECT DETAIL
 // ============================================================
 
-function ProjectDetail({ project, onOpenModule, onEdit, onAddModule, onRestore }) {
+function ProjectDetail({ project, onOpenModule, onEdit, onAddModule, onRestore, onCheckNow }) {
   const stage = effectiveStage(project);
   const health = projectHealth(project);
   const visibleModules = project.modules; // archived filtering already applied by fetch
+
+  const [checking, setChecking] = useState(false);
+  const [checkError, setCheckError] = useState(null);
+  const [lastResult, setLastResult] = useState(null);
+
+  async function handleCheckNow() {
+    setChecking(true);
+    setCheckError(null);
+    setLastResult(null);
+    try {
+      const result = await triggerHealthCheck(project.id);
+      setLastResult(result);
+      if (onCheckNow) await onCheckNow();
+    } catch (err) {
+      console.error('[Check now] failed:', err);
+      setCheckError(err.message || 'Health check failed');
+    } finally {
+      setChecking(false);
+    }
+  }
 
   return (
     <div className="slide-in">
@@ -704,9 +732,62 @@ function ProjectDetail({ project, onOpenModule, onEdit, onAddModule, onRestore }
           <Stat icon={<DollarSign size={11} />} label="Monthly" value={formatCurrency(project.monthlyCost)} />
           <Stat icon={<Activity size={11} />} label="Calls (MTD)" value={project.callsThisMonth.toLocaleString()} />
           <Stat icon={<Layers size={11} />} label="Modules" value={visibleModules.filter(m => !m.archived).length} />
-          <Stat icon={<LinkIcon size={11} />} label="Status" value={project.projectLink ? 'Live' : 'Not deployed'} />
+          <Stat icon={<LinkIcon size={11} />} label="Endpoint" value={project.endpoint ? 'Configured' : 'None'} />
         </div>
       </div>
+
+      {project.endpoint && (
+        <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18, marginBottom: 20 }}>
+          <SectionLabel icon={<LinkIcon size={12} />}>Project endpoint</SectionLabel>
+          <div style={{ fontFamily: 'monospace', fontSize: 12, color: TEXT, padding: '9px 11px', background: BG, borderRadius: 4, border: `1px solid ${BORDER}`, wordBreak: 'break-all', marginBottom: 10 }}>{project.endpoint}</div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              onClick={handleCheckNow}
+              disabled={checking}
+              style={{
+                padding: '7px 11px', border: `1px solid ${YELLOW}`,
+                background: checking ? 'transparent' : YELLOW,
+                color: checking ? YELLOW : BG,
+                borderRadius: 4, fontSize: 12, fontWeight: 600,
+                cursor: checking ? 'wait' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 6,
+                opacity: checking ? 0.7 : 1
+              }}
+            >
+              <RefreshCw size={11} className={checking ? 'spin' : ''} />
+              {checking ? 'Checking…' : 'Check now'}
+            </button>
+            <span style={{ fontSize: 11, color: TEXT_DIM }}>
+              Last check: {formatTime(project.lastHealthCheck)}
+            </span>
+          </div>
+
+          {project.lastError && !checking && !lastResult && (
+            <div style={{ marginTop: 10, padding: '7px 10px', background: HEALTH_CONFIG.red.bg, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG.red.color, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span><strong>Last error:</strong> {project.lastError}</span>
+            </div>
+          )}
+
+          {checkError && (
+            <div style={{ marginTop: 10, padding: '7px 10px', background: HEALTH_CONFIG.red.bg, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG.red.color, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <AlertCircle size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span><strong>Couldn't run check:</strong> {checkError}</span>
+            </div>
+          )}
+
+          {lastResult && lastResult.results?.[0] && (
+            <div style={{ marginTop: 10, padding: '8px 10px', background: HEALTH_CONFIG[lastResult.results[0].status]?.bg || BG, borderRadius: 4, fontSize: 11.5, color: HEALTH_CONFIG[lastResult.results[0].status]?.color || TEXT, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <CheckCircle2 size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                <strong>{HEALTH_CONFIG[lastResult.results[0].status]?.label || 'Result'}</strong>
+                {lastResult.results[0].response_time_ms != null && ` · ${lastResult.results[0].response_time_ms}ms`}
+                {lastResult.results[0].error && ` · ${lastResult.results[0].error}`}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12, marginBottom: 20 }}>
         <div style={{ background: PANEL, borderRadius: 6, border: `1px solid ${BORDER}`, padding: 18 }}>

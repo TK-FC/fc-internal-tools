@@ -165,11 +165,19 @@ function Dashboard({ user, onSignOut }) {
     // Totals only count active (non-archived) items
     const activeProjects = projects.filter(p => !p.archived);
     const allModules = activeProjects.flatMap(p => p.modules.filter(m => !m.archived));
+    // Online/Issues count every monitored endpoint — modules + projects
+    // that have their own endpoint. A project with no endpoint contributes
+    // nothing here (its modules still get counted individually).
+    const projectsWithEndpoint = activeProjects.filter(p => p.endpoint);
+    const monitored = [
+      ...allModules.map(m => m.healthStatus),
+      ...projectsWithEndpoint.map(p => p.healthStatus || 'none')
+    ];
     return {
       projects: activeProjects.length,
       modules: allModules.length,
-      online: allModules.filter(m => m.healthStatus === 'green').length,
-      issues: allModules.filter(m => m.healthStatus === 'amber' || m.healthStatus === 'red').length,
+      online: monitored.filter(s => s === 'green').length,
+      issues: monitored.filter(s => s === 'amber' || s === 'red').length,
       monthlyCost: activeProjects.reduce((s, p) => s + p.monthlyCost, 0),
       monthlyCalls: activeProjects.reduce((s, p) => s + p.callsThisMonth, 0)
     };
